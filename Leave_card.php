@@ -73,28 +73,6 @@ function addMonthlyLeaveCredits(PDO $pdo) {
     return true;
 }
 
-/**
- * Calculate working days between two dates (excluding weekends)
- * 
- * @param string $startDate Start date in Y-m-d format
- * @param string $endDate End date in Y-m-d format
- * @return int Number of working days
- */
-function calculateWorkingDays($startDate, $endDate) {
-    $start = new DateTime($startDate);
-    $end = new DateTime($endDate);
-    $days = 0;
-    
-    while ($start <= $end) {
-        // 6 = Saturday, 7 = Sunday
-        if ($start->format('N') < 6) {
-            $days++;
-        }
-        $start->modify('+1 day');
-    }
-    return $days;
-}
-
 // Create leave_credit_updates table if it doesn't exist
 try {
     $pdo->exec("
@@ -227,64 +205,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
                     $message = "Employee deleted successfully.";
                     break;
-
-                case 'apply_leave':
-                    $employeeId = intval($_POST['employee_id']);
-                    $leaveType = $_POST['leave_type'];
-                    $startDate = $_POST['start_date'];
-                    $endDate = $_POST['end_date'];
-
-                    // Validate leave type
-                    if (!in_array($leaveType, ['sick_leave', 'vacation_leave'])) {
-                        throw new Exception("Invalid leave type");
-                    }
-
-                    // Calculate number of working days
-                    $numberOfDays = calculateWorkingDays($startDate, $endDate);
-
-                    // Get current leave credits
-                    $stmt = $pdo->prepare("
-                        SELECT lc.* 
-                        FROM leave_credits lc 
-                        JOIN employees e ON e.leave_credits_id = lc.id 
-                        WHERE e.id = :id
-                    ");
-                    $stmt->execute([':id' => $employeeId]);
-                    $currentCredits = $stmt->fetch(PDO::FETCH_ASSOC);
-
-                    // Check if enough credits are available
-                    if ($leaveType === 'sick_leave' && $currentCredits['sick_leave'] < $numberOfDays) {
-                        throw new Exception("Insufficient sick leave credits");
-                    } elseif ($leaveType === 'vacation_leave' && $currentCredits['vacation_leave'] < $numberOfDays) {
-                        throw new Exception("Insufficient vacation leave credits");
-                    }
-
-                    // Insert leave application
-                    $stmt = $pdo->prepare("
-                        INSERT INTO leave_applications 
-                        (employee_id, leave_type, start_date, end_date, number_of_days) 
-                        VALUES (:employee_id, :leave_type, :start_date, :end_date, :days)
-                    ");
-                    $stmt->execute([
-                        ':employee_id' => $employeeId, 
-                        ':leave_type' => $leaveType, 
-                        ':start_date' => $startDate, 
-                        ':end_date' => $endDate, 
-                        ':days' => $numberOfDays
-                    ]);
-
-                    // Update leave credits
-                    $updateField = $leaveType === 'sick_leave' ? 'sick_leave' : 'vacation_leave';
-                    $stmt = $pdo->prepare("
-                        UPDATE leave_credits 
-                        SET $updateField = $updateField - :days,
-                            total_leave_credits = total_leave_credits - :days
-                        WHERE id = (SELECT leave_credits_id FROM employees WHERE id = :id)
-                    ");
-                    $stmt->execute([':days' => $numberOfDays, ':id' => $employeeId]);
-
-                    $message = "Leave application submitted successfully";
-                    break;
             }
 
             $pdo->commit();
@@ -323,21 +243,6 @@ $stmt = $pdo->prepare("
 ");
 $stmt->execute([':search' => "%$search%"]);
 $employees = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-// Fetch leave history
-$stmt = $pdo->prepare("
-    SELECT 
-        la.*,
-        e.name as employee_name
-    FROM 
-        leave_applications la
-    JOIN 
-        employees e ON la.employee_id = e.id
-    ORDER BY 
-        la.start_date DESC
-");
-$stmt->execute();
-$leaveHistory = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Fetch credit update history
 $stmt = $pdo->prepare("
@@ -410,9 +315,9 @@ $nextUpdate = $lastUpdateDate ?
             <button onclick="openModal('add')" class="btn btn-success">
                 <i class="bx bx-plus-circle"></i> Add New Employee
             </button>
-            <button onclick="openModal('apply_leave')" class="btn btn-primary">
+            <a href="apply_leave.php" class="btn btn-primary">
                 <i class="bx bx-calendar"></i> Apply Leave
-            </button>
+            </a>
             <button onclick="openRecentChangesModal()" class="btn btn-info">
                 <i class="bx bx-history"></i> View Recent Changes
             </button>
@@ -606,51 +511,6 @@ $nextUpdate = $lastUpdateDate ?
         </div>
     </div>
 
-    <!-- Apply Leave Modal -->
-    <div class="modal fade" id="apply_leaveModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Apply Leave</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <form method="POST">
-                        <input type="hidden" name="action" value="apply_leave">
-                        <div class="mb-3">
-                            <label for="employee_id" class="form-label">Employee:</label>
-                            <select class="form-select" id="employee_id" name="employee_id" required>
-                                <?php foreach($employees as $employee): ?>
-                                <option value="<?php echo htmlspecialchars($employee['id']); ?>">
-                                    <?php echo htmlspecialchars($employee['name']); ?> 
-                                    (Sick: <?php echo number_format($employee['sick_leave'], 2); ?>, 
-                                    Vacation: <?php echo number_format($employee['vacation_leave'], 2); ?>)
-                                </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-                        <div class="mb-3">
-                            <label for="leave_type" class="form-label">Leave Type:</label>
-                            <select class="form-select" id="leave_type" name="leave_type" required>
-                                <option value="sick_leave">Sick Leave</option>
-                                <option value="vacation_leave">Vacation Leave</option>
-                            </select>
-                        </div>
-                        <div class="mb-3">
-                            <label for="start_date" class="form-label">Start Date:</label>
-                            <input type="date" class="form-control" id="start_date" name="start_date" required>
-                        </div>
-                        <div class="mb-3">
-                            <label for="end_date" class="form-label">End Date:</label>
-                            <input type="date" class="form-control" id="end_date" name="end_date" required>
-                        </div>
-                        <button type="submit" class="btn btn-primary">Submit Leave Application</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <!-- Recent Changes Modal -->
     <div class="modal fade" id="recentChangesModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-xl">
@@ -665,11 +525,6 @@ $nextUpdate = $lastUpdateDate ?
                         <li class="nav-item" role="presentation">
                             <button class="nav-link active" id="credit-updates-tab" data-bs-toggle="tab" data-bs-target="#credit-updates" type="button" role="tab" aria-controls="credit-updates" aria-selected="true">
                                 <i class="bx bx-plus-circle"></i> Credit Updates
-                            </button>
-                        </li>
-                        <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="leave-history-tab" data-bs-toggle="tab" data-bs-target="#leave-history" type="button" role="tab" aria-controls="leave-history" aria-selected="false">
-                                <i class="bx bx-calendar"></i> Leave History
                             </button>
                         </li>
                     </ul>
@@ -703,40 +558,6 @@ $nextUpdate = $lastUpdateDate ?
                                         <?php else: ?>
                                             <tr>
                                                 <td colspan="5" class="text-center">No credit update history found</td>
-                                            </tr>
-                                        <?php endif; ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                        
-                        <!-- Leave History Tab -->
-                        <div class="tab-pane fade" id="leave-history" role="tabpanel" aria-labelledby="leave-history-tab">
-                            <div class="table-responsive">
-                                <table class="table table-striped table-bordered">
-                                    <thead class="table-dark">
-                                        <tr>
-                                            <th>Employee</th>
-                                            <th>Leave Type</th>
-                                            <th>Start Date</th>
-                                            <th>End Date</th>
-                                            <th>Days</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php if (count($leaveHistory) > 0): ?>
-                                            <?php foreach($leaveHistory as $leave): ?>
-                                            <tr>
-                                                <td><?php echo htmlspecialchars($leave['employee_name']); ?></td>
-                                                <td><?php echo ucfirst(str_replace('_', ' ', $leave['leave_type'])); ?></td>
-                                                <td><?php echo date('M d, Y', strtotime($leave['start_date'])); ?></td>
-                                                <td><?php echo date('M d, Y', strtotime($leave['end_date'])); ?></td>
-                                                <td><?php echo $leave['number_of_days']; ?></td>
-                                            </tr>
-                                            <?php endforeach; ?>
-                                        <?php else: ?>
-                                            <tr>
-                                                <td colspan="5" class="text-center">No leave history found</td>
                                             </tr>
                                         <?php endif; ?>
                                     </tbody>
@@ -802,7 +623,6 @@ $nextUpdate = $lastUpdateDate ?
             });
         });
 
-        // Date validation for leave application
         document.addEventListener('DOMContentLoaded', function() {
             const urlParams = new URLSearchParams(window.location.search);
             const message = urlParams.get('message');
@@ -820,27 +640,6 @@ $nextUpdate = $lastUpdateDate ?
                     title: 'Error',
                     text: error,
                 });
-            }
-
-            // Date validation for leave application
-            const startDate = document.getElementById('start_date');
-            const endDate = document.getElementById('end_date');
-
-            if (startDate && endDate) {
-                startDate.addEventListener('change', function() {
-                    endDate.min = this.value;
-                });
-
-                endDate.addEventListener('change', function() {
-                    if (startDate.value && this.value < startDate.value) {
-                        this.value = startDate.value;
-                    }
-                });
-
-                // Set minimum date to today
-                const today = new Date().toISOString().split('T')[0];
-                startDate.min = today;
-                endDate.min = today;
             }
         });
     </script>
